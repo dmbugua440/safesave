@@ -1,6 +1,6 @@
 # SafeSave Backend API
 
-A production-ready savings management backend built with FastAPI and Python, designed for the Kenyan market with M-Pesa payments via PayHero.
+A production-ready savings management backend with an integrated marketplace, built with FastAPI and Python for the Kenyan market. Payments via M-Pesa through PayHero.
 
 **Live API:** https://safesave-81bf.onrender.com  
 **Docs:** https://safesave-81bf.onrender.com/docs
@@ -14,11 +14,17 @@ A production-ready savings management backend built with FastAPI and Python, des
 - M-Pesa deposits via PayHero STK Push
 - M-Pesa withdrawals back to user phone
 - Automatic email notifications on deposit and goal completion
-- Admin dashboard (list users, transactions, suspend/activate accounts)
+- **Marketplace** — buy/sell cars, houses, land, electronics
+- Photo uploads for listings (unlimited)
+- 5% commission on every completed sale (auto-triggered)
+- Seller profiles with full contact details
+- Admin dashboard — users, transactions, listings, commissions
 - Transaction reconciliation for pending payments
 - Maintenance mode, health check, and metrics endpoints
 - Structured JSON logging
 - Docker + Nginx + PostgreSQL deployment ready
+- Alembic database migrations
+- 27 integration tests
 
 ## Tech Stack
 
@@ -65,6 +71,9 @@ Copy `.env.example` to `.env` and fill in:
 | `SMTP_USERNAME` | Gmail address for sending emails |
 | `SMTP_PASSWORD` | Gmail app password |
 | `FRONTEND_URL` | Frontend URL for email links |
+| `COMMISSION_RATE` | Marketplace commission rate (default `0.05` = 5%) |
+| `COMMISSION_PHONE` | Your M-Pesa number to receive commissions |
+| `COMMISSION_GRACE_DAYS` | Days seller has to pay commission before restriction (default `30`) |
 
 ---
 
@@ -108,6 +117,22 @@ Savings categories: `general`, `school_fees`, `rent`, `emergency`, `car`, `house
 |--------|----------|-------------|
 | POST | `/webhooks/payhero` | PayHero payment callback |
 
+### Marketplace
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/market/seller/profile` | Create seller profile with contacts |
+| PATCH | `/market/seller/profile` | Update seller profile |
+| GET | `/market/seller/profile` | Get your seller profile |
+| POST | `/market/listings` | Create listing with photo uploads (multipart/form-data) |
+| GET | `/market/listings` | Browse active listings (filter: category, min_price, max_price, location) |
+| GET | `/market/listings/{id}` | View single listing (increments view count) |
+| POST | `/market/listings/{id}/buy` | Buy item — returns seller contacts, marks sold, triggers commission |
+| POST | `/market/listings/{id}/photos` | Add more photos to a listing |
+| GET | `/market/my-listings` | Your own listings with commission status |
+| DELETE | `/market/listings/{id}` | Remove your listing |
+| GET | `/market/commissions` | Your commission records |
+| POST | `/market/commissions/{id}/pay` | Pay commission via M-Pesa STK Push |
+
 ### Admin (VIP users only)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -116,6 +141,10 @@ Savings categories: `general`, `school_fees`, `rent`, `emergency`, `car`, `house
 | PATCH | `/admin/users/{id}/suspend` | Suspend a user |
 | PATCH | `/admin/users/{id}/activate` | Activate a user |
 | POST | `/admin/reconcile` | Reconcile pending transactions |
+| GET | `/admin/market/listings` | All marketplace listings |
+| PATCH | `/admin/market/listings/{id}/suspend` | Suspend a listing |
+| GET | `/admin/market/commissions` | All commissions + totals earned |
+| PATCH | `/admin/market/commissions/{id}/mark-paid` | Confirm commission paid |
 
 ### System
 | Method | Endpoint | Description |
@@ -143,6 +172,23 @@ Savings categories: `general`, `school_fees`, `rent`, `emergency`, `car`, `house
 3. Backend calls PayHero withdrawal API to send funds to user's M-Pesa
 4. Savings goal is closed
 
+## Marketplace Flow
+
+1. Seller creates profile at `POST /market/seller/profile` with contact details
+2. Seller posts listing at `POST /market/listings` with photos, price, category
+3. Buyers browse at `GET /market/listings`
+4. Buyer clicks Buy → `POST /market/listings/{id}/buy`
+   - Listing marked as SOLD and disappears from browse
+   - Seller's full contacts returned to buyer
+   - Buyer receives contacts via email
+   - 5% commission record created for seller
+   - Seller receives email with commission due notice
+5. Seller pays commission at `POST /market/commissions/{id}/pay` (M-Pesa STK Push)
+6. Admin confirms payment at `PATCH /admin/market/commissions/{id}/mark-paid`
+7. Seller's account restriction lifted — can post again
+
+**Savings + Marketplace link:** Users can browse the market, see item prices, and create a savings goal for that exact amount as their target.
+
 ---
 
 ## Running Tests
@@ -151,7 +197,7 @@ Savings categories: `general`, `school_fees`, `rent`, `emergency`, `car`, `house
 pytest tests/ -v
 ```
 
-27 tests covering all endpoints including full webhook flow.
+27 tests covering all core endpoints including full webhook flow.
 
 ---
 
@@ -160,7 +206,7 @@ pytest tests/ -v
 1. Push repo to GitHub
 2. Go to Render → New → Blueprint
 3. Connect `dmbugua440/safesave` — Render reads `render.yaml` automatically
-4. Add secret env vars: `PAYHERO_API_KEY`, `PAYHERO_API_SECRET`, `PAYHERO_CHANNEL_ID`
+4. Add secret env vars: `PAYHERO_API_KEY`, `PAYHERO_API_SECRET`, `PAYHERO_CHANNEL_ID`, `COMMISSION_PHONE`
 5. Deploy
 
 Or deploy manually with Docker:
