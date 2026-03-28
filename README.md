@@ -1,109 +1,177 @@
 # SafeSave Backend API
 
-A secure savings management application backend built with FastAPI and Python.
+A production-ready savings management backend built with FastAPI and Python, designed for the Kenyan market with M-Pesa payments via PayHero.
+
+**Live API:** https://safesave-81bf.onrender.com  
+**Docs:** https://safesave-81bf.onrender.com/docs
+
+---
 
 ## Features
 
-- **User Authentication**: Registration and login with JWT tokens
-- **Savings Goals**: Create and manage savings targets with duration
-- **Deposits**: Make deposits toward savings goals
-- **Withdrawals**: Withdraw funds when target is reached or duration expires
-- **VIP Accounts**: Special account tier with minimum deposit requirements (5000 KSH)
-- **Customer Care**: Contact information for support
-- **Secure Passwords**: Bcrypt hashing for password security
+- JWT authentication with email verification and password reset
+- Multiple savings goals per user with categories
+- M-Pesa deposits via PayHero STK Push
+- M-Pesa withdrawals back to user phone
+- Automatic email notifications on deposit and goal completion
+- Admin dashboard (list users, transactions, suspend/activate accounts)
+- Transaction reconciliation for pending payments
+- Maintenance mode, health check, and metrics endpoints
+- Structured JSON logging
+- Docker + Nginx + PostgreSQL deployment ready
 
 ## Tech Stack
 
-- **Framework**: FastAPI
-- **Database**: SQLite (with SQLAlchemy ORM)
-- **Authentication**: JWT (python-jose)
-- **Server**: Uvicorn
-- **Language**: Python 3.11
+- FastAPI + Python 3.11
+- SQLAlchemy ORM (SQLite dev / PostgreSQL production)
+- Alembic migrations
+- JWT (python-jose) + bcrypt passwords
+- PayHero API (M-Pesa STK Push + withdrawals)
+- Gunicorn + Uvicorn workers
+- Docker + Docker Compose + Nginx
 
-## Installation
+---
 
-### Prerequisites
-- Python 3.11 or higher
-- pip package manager
+## Quick Start
 
-### Setup
-
-1. Clone the repository:
 ```bash
 git clone https://github.com/dmbugua440/safesave.git
 cd safesave
-```
-
-2. Create virtual environment (optional but recommended):
-```bash
 python -m venv venv
-venv\Scripts\activate  # On Windows
-source venv/bin/activate  # On macOS/Linux
-```
-
-3. Install dependencies:
-```bash
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
+cp .env.example .env         # fill in your values
+python -m alembic upgrade head
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-4. Run the server:
-```bash
-py -3.11 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
+Visit http://localhost:8000/docs for interactive API docs.
 
-## API Documentation
+---
 
-Once running, visit:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in:
+
+| Variable | Description |
+|----------|-------------|
+| `SECRET_KEY` | JWT secret — generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `DATABASE_URL` | SQLite (dev) or PostgreSQL (production) |
+| `PAYHERO_API_KEY` | Basic auth token from PayHero dashboard |
+| `PAYHERO_CHANNEL_ID` | Your PayHero payment channel ID |
+| `PAYHERO_BASE_URL` | `https://backend.payhero.co.ke/api/v2` |
+| `WEBHOOK_URL` | Public URL for PayHero callbacks e.g. `https://yourdomain.com/webhooks/payhero` |
+| `SMTP_USERNAME` | Gmail address for sending emails |
+| `SMTP_PASSWORD` | Gmail app password |
+| `FRONTEND_URL` | Frontend URL for email links |
+
+---
 
 ## API Endpoints
 
-### Authentication
-- `POST /register` - Create new user account
-- `POST /login` - Login and get JWT token
+### Auth
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/register` | Register new user (sends verification email) |
+| GET | `/verify-email?token=` | Verify email address |
+| POST | `/login` | Login, returns JWT token |
+| POST | `/forgot-password` | Request password reset email |
+| POST | `/reset-password` | Reset password with token |
+
+### Profile
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/profile` | Get current user profile |
+| PATCH | `/profile` | Update phone, name, deposit mode |
+| DELETE | `/profile` | Deactivate account |
 
 ### Savings
-- `POST /savings` - Create savings goal
-- `GET /savings/status` - Check savings progress
-- `POST /deposit` - Make deposit
-- `POST /withdraw` - Withdraw funds
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/savings` | Create a savings goal |
+| GET | `/savings` | List all savings goals |
+| GET | `/savings/{id}` | Get specific savings goal |
+| GET | `/savings/status` | Get first active goal (backwards compat) |
 
-### Support
-- `GET /customer-care` - Get support contact information
+Savings categories: `general`, `school_fees`, `rent`, `emergency`, `car`, `house`, `land`, `party`
 
-## Environment Configuration
+### Payments
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/deposit` | Initiate M-Pesa STK Push deposit |
+| POST | `/withdraw` | Withdraw savings to M-Pesa |
+| GET | `/transactions` | Transaction history (filter by `savings_id`) |
 
-Edit the following in `main.py` for production:
-- `SECRET_KEY` (line 19) - Use strong random key
-- Customer care email/phone (line 170-171)
-- Database URL (line 7)
+### Webhooks
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/webhooks/payhero` | PayHero payment callback |
 
-## Payment Integration
+### Admin (VIP users only)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/admin/users` | List all users |
+| GET | `/admin/transactions` | List all transactions |
+| PATCH | `/admin/users/{id}/suspend` | Suspend a user |
+| PATCH | `/admin/users/{id}/activate` | Activate a user |
+| POST | `/admin/reconcile` | Reconcile pending transactions |
 
-Currently using placeholder for Pay Hero payment processing.
-To integrate Pay Hero:
-1. Get API credentials from Pay Hero
-2. Update the `/deposit` endpoint in `main.py`
-3. Implement actual payment flow
+### System
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/metrics` | Operational metrics |
+| GET | `/customer-care` | Support contact info |
 
-## Development
+---
 
-The server runs with auto-reload enabled (`--reload` flag), so changes to src files will automatically reload the server.
+## Deposit Flow
 
-## Next Steps
+1. User calls `POST /deposit` with `savings_id`, `amount`, `phone`
+2. Backend creates a PENDING transaction and calls PayHero `POST /payments`
+3. User receives M-Pesa STK Push prompt on their phone
+4. User enters M-Pesa PIN
+5. PayHero sends callback to `/webhooks/payhero`
+6. Backend updates transaction to COMPLETED and adds amount to savings
+7. User receives email confirmation
 
-- Implement Pay Hero payment gateway integration
-- Create mobile frontend (Android/iOS)
-- Add user profile management
-- Add savings history/audit logs
-- Implement withdrawal request processing
-- Add SMS/Email notifications
+## Withdrawal Flow
+
+1. User calls `POST /withdraw` with `savings_id` and `phone`
+2. Backend checks target reached or duration expired
+3. Backend calls PayHero withdrawal API to send funds to user's M-Pesa
+4. Savings goal is closed
+
+---
+
+## Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+27 tests covering all endpoints including full webhook flow.
+
+---
+
+## Deployment (Render)
+
+1. Push repo to GitHub
+2. Go to Render → New → Blueprint
+3. Connect `dmbugua440/safesave` — Render reads `render.yaml` automatically
+4. Add secret env vars: `PAYHERO_API_KEY`, `PAYHERO_API_SECRET`, `PAYHERO_CHANNEL_ID`
+5. Deploy
+
+Or deploy manually with Docker:
+
+```bash
+docker-compose up --build
+```
+
+---
 
 ## License
 
-Commercial - All rights reserved
-
-## Author
-
-SafeSave Development Team
+Commercial — All rights reserved  
+© SafeSave Ltd

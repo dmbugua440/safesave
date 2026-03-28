@@ -169,9 +169,10 @@ def test_create_savings(client, auth_headers):
 
 
 def test_create_duplicate_savings(client, auth_headers):
+    # Multiple goals are now allowed — second one should also succeed
     client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
     r = client.post("/savings", json={"target_amount": 3000, "duration_days": 10}, headers=auth_headers)
-    assert r.status_code == 400
+    assert r.status_code == 201
 
 
 def test_savings_status_no_goal(client, auth_headers):
@@ -197,28 +198,31 @@ def test_deposit_no_savings(client, auth_headers):
 
 
 def test_deposit_success(client, auth_headers):
-    client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
     mock_result = {"success": True, "status": "QUEUED", "reference": "TEST-REF-001", "CheckoutRequestID": "ws_CO_test"}
     with patch("main.pay_hero.initiate_payment", return_value=mock_result):
-        r = client.post("/deposit", json={"amount": 500, "phone": "0712345678"}, headers=auth_headers)
+        r = client.post("/deposit", json={"savings_id": savings_id, "amount": 500, "phone": "0712345678"}, headers=auth_headers)
     assert r.status_code == 201
     assert r.json()["status"] == "pending"
     assert r.json()["payhero_reference"] == "TEST-REF-001"
 
 
 def test_deposit_exceeds_target(client, auth_headers):
-    client.post("/savings", json={"target_amount": 1000, "duration_days": 30}, headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 1000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
     mock_result = {"success": True, "status": "QUEUED", "reference": "REF-A"}
     with patch("main.pay_hero.initiate_payment", return_value=mock_result):
-        r = client.post("/deposit", json={"amount": 2000, "phone": "0712345678"}, headers=auth_headers)
+        r = client.post("/deposit", json={"savings_id": savings_id, "amount": 2000, "phone": "0712345678"}, headers=auth_headers)
     assert r.status_code == 400
     assert "exceed" in r.json()["detail"].lower()
 
 
 def test_deposit_payhero_failure(client, auth_headers):
-    client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
     with patch("main.pay_hero.initiate_payment", return_value={"error": "Network timeout"}):
-        r = client.post("/deposit", json={"amount": 500, "phone": "0712345678"}, headers=auth_headers)
+        r = client.post("/deposit", json={"savings_id": savings_id, "amount": 500, "phone": "0712345678"}, headers=auth_headers)
     assert r.status_code == 400
     assert "failed" in r.json()["detail"].lower()
 
@@ -226,13 +230,14 @@ def test_deposit_payhero_failure(client, auth_headers):
 # ── Withdraw ───────────────────────────────────────────────────────────────────
 
 def test_withdraw_no_savings(client, auth_headers):
-    r = client.post("/withdraw", headers=auth_headers)
-    assert r.status_code == 400
+    r = client.post("/withdraw", json={"savings_id": 9999, "phone": "0712345678"}, headers=auth_headers)
+    assert r.status_code == 404
 
 
 def test_withdraw_target_not_reached(client, auth_headers):
-    client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
-    r = client.post("/withdraw", headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
+    r = client.post("/withdraw", json={"savings_id": savings_id, "phone": "0712345678"}, headers=auth_headers)
     assert r.status_code == 400
     assert "not reached" in r.json()["detail"].lower()
 
@@ -241,10 +246,12 @@ def test_withdraw_target_not_reached(client, auth_headers):
 
 def test_webhook_success_flow(client, auth_headers):
     """Full flow: create savings → deposit → webhook SUCCESS → savings updated"""
-    client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
+
     mock_result = {"success": True, "status": "QUEUED", "reference": "REF-WH-001"}
     with patch("main.pay_hero.initiate_payment", return_value=mock_result):
-        dep = client.post("/deposit", json={"amount": 500, "phone": "0712345678"}, headers=auth_headers)
+        dep = client.post("/deposit", json={"savings_id": savings_id, "amount": 500, "phone": "0712345678"}, headers=auth_headers)
     assert dep.status_code == 201
     ext_ref = dep.json()["external_reference"]
 
@@ -265,16 +272,17 @@ def test_webhook_success_flow(client, auth_headers):
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
-    # Savings should now reflect the deposit
-    status_r = client.get("/savings/status", headers=auth_headers)
+    # Check savings updated via /savings/{id}
+    status_r = client.get(f"/savings/{savings_id}", headers=auth_headers)
     assert status_r.json()["current_amount"] == 500.0
 
 
 def test_webhook_failed_payment(client, auth_headers):
-    client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    s = client.post("/savings", json={"target_amount": 5000, "duration_days": 30}, headers=auth_headers)
+    savings_id = s.json()["id"]
     mock_result = {"success": True, "status": "QUEUED", "reference": "REF-WH-002"}
     with patch("main.pay_hero.initiate_payment", return_value=mock_result):
-        dep = client.post("/deposit", json={"amount": 500, "phone": "0712345678"}, headers=auth_headers)
+        dep = client.post("/deposit", json={"savings_id": savings_id, "amount": 500, "phone": "0712345678"}, headers=auth_headers)
     ext_ref = dep.json()["external_reference"]
 
     webhook_payload = {
