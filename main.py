@@ -1156,3 +1156,653 @@ async def value_error_handler(request: Request, exc: ValueError):
 async def generic_error_handler(request: Request, exc: Exception):
     logger.error("Unhandled exception", extra={"error": str(exc), "path": str(request.url)})
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+# ===========================================================================
+# MARKETPLACE
+# ===========================================================================
+import uuid
+import shutil
+from pathlib import Path
+from fastapi import UploadFile, File, Form
+from fastapi.staticfiles import StaticFiles
+
+# ---------------------------------------------------------------------------
+# Marketplace config
+# ---------------------------------------------------------------------------
+COMMISSION_RATE = float(os.getenv("COMMISSION_RATE", "0.05"))          # 5%
+COMMISSION_PHONE = os.getenv("COMMISSION_PHONE", "+254712345678")       # your M-Pesa
+COMMISSION_GRACE_DAYS = int(os.getenv("COMMISSION_GRACE_DAYS", "30"))  # days before removal
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Serve uploaded files as static
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+# ---------------------------------------------------------------------------
+# Marketplace Enums
+# ---------------------------------------------------------------------------
+class ListingCategory(str, Enum):
+    CAR_NEW = "car_new"
+    CAR_USED = "car_used"
+    HOUSE = "house"
+    LAND = "land"
+    ELECTRONICS = "electronics"
+    OTHER = "other"
+
+class ListingStatus(str, Enum):
+    ACTIVE = "active"
+    SOLD = "sold"
+    SUSPENDED = "suspended"
+    REMOVED = "removed"
+
+class CommissionStatus(str, Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    OVERDUE = "overdue"
+
+# ---------------------------------------------------------------------------
+# Marketplace Models
+# ---------------------------------------------------------------------------
+class Listing(Base):
+    __tablename__ = "listings"
+    id = Column(Integer, primary_key=True, index=True)
+    seller_id = Column(Integer, index=True)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    category = Column(SQLEnum(ListingCategory), default=ListingCategory.OTHER)
+    price = Column(Float, nullable=False)
+    location = Column(String, nullable=True)
+    website_link = Column(String, nullable=True)
+    status = Column(SQLEnum(ListingStatus), default=ListingStatus.ACTIVE)
+    is_featured = Column(Boolean, default=False)
+    views = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    sold_at = Column(DateTime, nullable=True)
+
+class ListingPhoto(Base):
+    __tablename__ = "listing_photos"
+    id = Column(Integer, primary_key=True, index=True)
+    listing_id = Column(Integer, index=True)
+    filename = Column(String)
+    url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Commission(Base):
+    __tablename__ = "commissions"
+    id = Column(Integer, primary_key=True, index=True)
+    listing_id = Column(Integer, index=True)
+    seller_id = Column(Integer, index=True)
+    sale_price = Column(Float)
+    commission_amount = Column(Float)
+    status = Column(SQLEnum(CommissionStatus), default=CommissionStatus.PENDING)
+    due_date = Column(DateTime)
+    paid_at = Column(DateTime, nullable=True)
+    payhero_reference = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class SellerProfile(Base):
+    __tablename__ = "seller_profiles"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, unique=True, index=True)
+    business_name = Column(String, nullable=True)
+    contact_phone = Column(String)
+    contact_email = Column(String, nullable=True)
+    whatsapp = Column(String, nullable=True)
+    bio = Column(String, nullable=True)
+    is_verified = Column(Boolean, default=False)
+    has_unpaid_commission = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+Base.metadata.create_all(bind=engine, checkfirst=True)
+
+# ---------------------------------------------------------------------------
+# Marketplace Pydantic Schemas
+# ---------------------------------------------------------------------------
+class SellerProfileCreate(BaseModel):
+    business_name: Optional[str] = None
+    contact_phone: str
+    contact_email: Optional[str] = None
+    whatsapp: Optional[str] = None
+    bio: Optional[str] = None
+
+class SellerProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    business_name: Optional[str]
+    contact_phone: str
+    contact_email: Optional[str]
+    whatsapp: Optional[str]
+    bio: Optional[str]
+    is_verified: bool
+
+class ListingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    description: Optional[str]
+    category: ListingCategory
+    price: float
+    location: Optional[str]
+    website_link: Optional[str]
+    status: ListingStatus
+    views: int
+    created_at: datetime
+
+class CommissionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    listing_id: int
+    sale_price: float
+    commission_amount: float
+    status: CommissionStatus
+    due_date: datetime
+    created_at: datetime
+
+# ---------------------------------------------------------------------------
+# Marketplace helpers
+# ---------------------------------------------------------------------------
+def save_upload(file: UploadFile) -> tuple[str, str]:
+    """Save uploaded file, return (filename, url_path)."""
+    ext = Path(file.filename).suffix.lower()
+    allowed = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"File type {ext} not allowed. Use jpg, png, webp, gif.")
+    unique_name = f"{uuid.uuid4().hex}{ext}"
+    dest = UPLOAD_DIR / unique_name
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return unique_name, f"/uploads/{unique_name}"
+
+def check_seller_can_post(seller: SellerProfile):
+    """Block posting if seller has unpaid commission."""
+    if seller.has_unpaid_commission:
+        raise HTTPException(
+            status_code=403,
+            detail="You have an unpaid commission. Please pay before posting a new listing.",
+        )
+
+def send_commission_due_email(seller_email: str, seller_name: str, amount: float, listing_title: str):
+    body = f"""
+    <h2>Commission Due — SafeSave Marketplace</h2>
+    <p>Hi {seller_name or 'there'},</p>
+    <p>Your item <strong>{listing_title}</strong> has been marked as sold.</p>
+    <p>A commission of <strong>KES {amount:,.0f}</strong> (5% of sale price) is due to SafeSave.</p>
+    <p>Please pay via M-Pesa to <strong>{COMMISSION_PHONE}</strong> and contact support with your receipt.</p>
+    <p>You have <strong>{COMMISSION_GRACE_DAYS} days</strong> to pay before your account is restricted.</p>
+    <p>— SafeSave Marketplace Team</p>
+    """
+    send_email(seller_email, "Commission Due — SafeSave Marketplace", body)
+
+def send_buyer_contacts_email(buyer_email: str, buyer_name: str, listing_title: str, seller: SellerProfile):
+    body = f"""
+    <h2>Seller Contact Details</h2>
+    <p>Hi {buyer_name or 'there'},</p>
+    <p>Here are the contact details for <strong>{listing_title}</strong>:</p>
+    <ul>
+        <li><strong>Business:</strong> {seller.business_name or 'N/A'}</li>
+        <li><strong>Phone:</strong> {seller.contact_phone}</li>
+        <li><strong>Email:</strong> {seller.contact_email or 'N/A'}</li>
+        <li><strong>WhatsApp:</strong> {seller.whatsapp or 'N/A'}</li>
+    </ul>
+    <p>Good luck with your purchase!</p>
+    <p>— SafeSave Marketplace Team</p>
+    """
+    send_email(buyer_email, f"Seller Contacts for: {listing_title}", body)
+
+# ---------------------------------------------------------------------------
+# Seller Profile
+# ---------------------------------------------------------------------------
+@app.post("/market/seller/profile", status_code=201, tags=["Marketplace"])
+def create_seller_profile(
+    profile: SellerProfileCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create seller profile. Required before posting listings."""
+    if db.query(SellerProfile).filter(SellerProfile.user_id == current_user.id).first():
+        raise HTTPException(status_code=400, detail="Seller profile already exists. Use PATCH to update.")
+    sp = SellerProfile(
+        user_id=current_user.id,
+        business_name=profile.business_name,
+        contact_phone=profile.contact_phone,
+        contact_email=profile.contact_email or current_user.email,
+        whatsapp=profile.whatsapp,
+        bio=profile.bio,
+    )
+    db.add(sp)
+    db.commit()
+    db.refresh(sp)
+    return sp
+
+@app.patch("/market/seller/profile", tags=["Marketplace"])
+def update_seller_profile(
+    profile: SellerProfileCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update seller profile."""
+    sp = db.query(SellerProfile).filter(SellerProfile.user_id == current_user.id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Seller profile not found. Create one first.")
+    sp.business_name = profile.business_name or sp.business_name
+    sp.contact_phone = profile.contact_phone or sp.contact_phone
+    sp.contact_email = profile.contact_email or sp.contact_email
+    sp.whatsapp = profile.whatsapp or sp.whatsapp
+    sp.bio = profile.bio or sp.bio
+    sp.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sp)
+    return sp
+
+@app.get("/market/seller/profile", tags=["Marketplace"])
+def get_my_seller_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get your own seller profile."""
+    sp = db.query(SellerProfile).filter(SellerProfile.user_id == current_user.id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="No seller profile found.")
+    return sp
+
+# ---------------------------------------------------------------------------
+# Listings — Create with photo upload
+# ---------------------------------------------------------------------------
+@app.post("/market/listings", status_code=201, tags=["Marketplace"])
+def create_listing(
+    title: str = Form(...),
+    description: str = Form(None),
+    category: ListingCategory = Form(ListingCategory.OTHER),
+    price: float = Form(...),
+    location: str = Form(None),
+    website_link: str = Form(None),
+    photos: List[UploadFile] = File(default=[]),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a marketplace listing with optional photo uploads."""
+    seller = db.query(SellerProfile).filter(SellerProfile.user_id == current_user.id).first()
+    if not seller:
+        raise HTTPException(status_code=400, detail="Create a seller profile first at POST /market/seller/profile")
+    check_seller_can_post(seller)
+
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="Price must be greater than 0")
+
+    listing = Listing(
+        seller_id=current_user.id,
+        title=title,
+        description=description,
+        category=category,
+        price=price,
+        location=location,
+        website_link=website_link,
+    )
+    db.add(listing)
+    db.commit()
+    db.refresh(listing)
+
+    # Save uploaded photos
+    saved_photos = []
+    for photo in photos:
+        if photo.filename:
+            try:
+                filename, url = save_upload(photo)
+                lp = ListingPhoto(listing_id=listing.id, filename=filename, url=url)
+                db.add(lp)
+                saved_photos.append(url)
+            except HTTPException as e:
+                logger.warning("Photo upload skipped", extra={"error": e.detail})
+
+    db.commit()
+    logger.info("Listing created", extra={"listing_id": listing.id, "seller_id": current_user.id})
+    return {
+        "id": listing.id,
+        "title": listing.title,
+        "category": listing.category,
+        "price": listing.price,
+        "photos": saved_photos,
+        "message": "Listing created successfully",
+    }
+
+# ---------------------------------------------------------------------------
+# Listings — Browse (public)
+# ---------------------------------------------------------------------------
+@app.get("/market/listings", tags=["Marketplace"])
+def browse_listings(
+    db: Session = Depends(get_db),
+    category: Optional[ListingCategory] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    location: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 20,
+):
+    """Browse active marketplace listings. Public endpoint."""
+    query = db.query(Listing).filter(Listing.status == ListingStatus.ACTIVE)
+    if category:
+        query = query.filter(Listing.category == category)
+    if min_price is not None:
+        query = query.filter(Listing.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Listing.price <= max_price)
+    if location:
+        query = query.filter(Listing.location.ilike(f"%{location}%"))
+
+    total = query.count()
+    listings = query.order_by(Listing.created_at.desc()).offset(skip).limit(limit).all()
+
+    result = []
+    for l in listings:
+        photos = db.query(ListingPhoto).filter(ListingPhoto.listing_id == l.id).all()
+        result.append({
+            "id": l.id,
+            "title": l.title,
+            "description": l.description,
+            "category": l.category,
+            "price": l.price,
+            "location": l.location,
+            "website_link": l.website_link,
+            "photos": [p.url for p in photos],
+            "views": l.views,
+            "created_at": l.created_at,
+        })
+    return {"total": total, "listings": result}
+
+@app.get("/market/listings/{listing_id}", tags=["Marketplace"])
+def get_listing(listing_id: int, db: Session = Depends(get_db)):
+    """Get a single listing. Increments view count."""
+    listing = db.query(Listing).filter(
+        Listing.id == listing_id,
+        Listing.status == ListingStatus.ACTIVE,
+    ).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+
+    listing.views += 1
+    db.commit()
+
+    photos = db.query(ListingPhoto).filter(ListingPhoto.listing_id == listing_id).all()
+    return {
+        "id": listing.id,
+        "title": listing.title,
+        "description": listing.description,
+        "category": listing.category,
+        "price": listing.price,
+        "location": listing.location,
+        "website_link": listing.website_link,
+        "photos": [p.url for p in photos],
+        "views": listing.views,
+        "created_at": listing.created_at,
+    }
+
+# ---------------------------------------------------------------------------
+# Buy — reveals seller contacts, marks item sold, triggers commission
+# ---------------------------------------------------------------------------
+@app.post("/market/listings/{listing_id}/buy", tags=["Marketplace"])
+def buy_listing(
+    listing_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Buyer clicks Buy. Returns full seller contacts.
+    Marks listing as SOLD and creates a commission record for the seller.
+    """
+    listing = db.query(Listing).filter(
+        Listing.id == listing_id,
+        Listing.status == ListingStatus.ACTIVE,
+    ).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found or already sold")
+
+    if listing.seller_id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot buy your own listing")
+
+    seller = db.query(SellerProfile).filter(SellerProfile.user_id == listing.seller_id).first()
+    if not seller:
+        raise HTTPException(status_code=404, detail="Seller profile not found")
+
+    # Mark listing as sold
+    listing.status = ListingStatus.SOLD
+    listing.sold_at = datetime.utcnow()
+
+    # Create commission record
+    commission_amount = round(listing.price * COMMISSION_RATE, 2)
+    commission = Commission(
+        listing_id=listing.id,
+        seller_id=listing.seller_id,
+        sale_price=listing.price,
+        commission_amount=commission_amount,
+        status=CommissionStatus.PENDING,
+        due_date=datetime.utcnow() + timedelta(days=COMMISSION_GRACE_DAYS),
+    )
+    db.add(commission)
+
+    # Flag seller as having unpaid commission
+    seller.has_unpaid_commission = True
+    db.commit()
+
+    # Notify seller of commission due
+    seller_user = db.query(User).filter(User.id == listing.seller_id).first()
+    if seller_user:
+        background_tasks.add_task(
+            send_commission_due_email,
+            seller_user.email,
+            seller_user.full_name or "",
+            commission_amount,
+            listing.title,
+        )
+
+    # Send buyer the seller contacts via email
+    background_tasks.add_task(
+        send_buyer_contacts_email,
+        current_user.email,
+        current_user.full_name or "",
+        listing.title,
+        seller,
+    )
+
+    logger.info("Listing sold", extra={"listing_id": listing_id, "buyer_id": current_user.id, "commission": commission_amount})
+    return {
+        "message": "Purchase initiated. Seller contacts sent to your email.",
+        "seller_contacts": {
+            "business_name": seller.business_name,
+            "phone": seller.contact_phone,
+            "email": seller.contact_email,
+            "whatsapp": seller.whatsapp,
+        },
+        "commission_info": {
+            "amount_due": commission_amount,
+            "pay_to": COMMISSION_PHONE,
+            "due_date": commission.due_date,
+        },
+    }
+
+# ---------------------------------------------------------------------------
+# Seller — manage own listings
+# ---------------------------------------------------------------------------
+@app.get("/market/my-listings", tags=["Marketplace"])
+def my_listings(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all listings posted by the current user."""
+    listings = db.query(Listing).filter(Listing.seller_id == current_user.id).order_by(Listing.created_at.desc()).all()
+    result = []
+    for l in listings:
+        photos = db.query(ListingPhoto).filter(ListingPhoto.listing_id == l.id).all()
+        commissions = db.query(Commission).filter(Commission.listing_id == l.id).all()
+        result.append({
+            "id": l.id,
+            "title": l.title,
+            "category": l.category,
+            "price": l.price,
+            "status": l.status,
+            "views": l.views,
+            "photos": [p.url for p in photos],
+            "pending_commission": sum(c.commission_amount for c in commissions if c.status == CommissionStatus.PENDING),
+            "created_at": l.created_at,
+            "sold_at": l.sold_at,
+        })
+    return {"total": len(result), "listings": result}
+
+@app.delete("/market/listings/{listing_id}", tags=["Marketplace"])
+def delete_listing(listing_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Remove your own listing."""
+    listing = db.query(Listing).filter(Listing.id == listing_id, Listing.seller_id == current_user.id).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    listing.status = ListingStatus.REMOVED
+    db.commit()
+    return {"message": "Listing removed"}
+
+@app.post("/market/listings/{listing_id}/photos", tags=["Marketplace"])
+def add_photos(
+    listing_id: int,
+    photos: List[UploadFile] = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add more photos to an existing listing."""
+    listing = db.query(Listing).filter(Listing.id == listing_id, Listing.seller_id == current_user.id).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    saved = []
+    for photo in photos:
+        if photo.filename:
+            filename, url = save_upload(photo)
+            db.add(ListingPhoto(listing_id=listing_id, filename=filename, url=url))
+            saved.append(url)
+    db.commit()
+    return {"added": len(saved), "photos": saved}
+
+# ---------------------------------------------------------------------------
+# Commission — seller pays commission
+# ---------------------------------------------------------------------------
+@app.get("/market/commissions", tags=["Marketplace"])
+def my_commissions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all commission records for the current seller."""
+    commissions = db.query(Commission).filter(Commission.seller_id == current_user.id).all()
+    return {
+        "total_pending": sum(c.commission_amount for c in commissions if c.status == CommissionStatus.PENDING),
+        "commissions": [
+            {
+                "id": c.id,
+                "listing_id": c.listing_id,
+                "sale_price": c.sale_price,
+                "commission_amount": c.commission_amount,
+                "status": c.status,
+                "due_date": c.due_date,
+                "paid_at": c.paid_at,
+            }
+            for c in commissions
+        ],
+    }
+
+@app.post("/market/commissions/{commission_id}/pay", tags=["Marketplace"])
+def pay_commission(
+    commission_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Seller initiates commission payment via M-Pesa STK Push.
+    Sends STK push to seller's registered phone.
+    """
+    commission = db.query(Commission).filter(
+        Commission.id == commission_id,
+        Commission.seller_id == current_user.id,
+        Commission.status == CommissionStatus.PENDING,
+    ).first()
+    if not commission:
+        raise HTTPException(status_code=404, detail="Commission not found or already paid")
+
+    seller = db.query(SellerProfile).filter(SellerProfile.user_id == current_user.id).first()
+    phone = seller.contact_phone if seller else current_user.phone
+
+    external_ref = f"COMM-{commission.id}-{int(datetime.utcnow().timestamp())}"
+    result = pay_hero.initiate_payment(
+        phone=phone,
+        amount=commission.commission_amount,
+        external_reference=external_ref,
+        description=f"SafeSave commission for listing #{commission.listing_id}",
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=f"Payment initiation failed: {result['error']}")
+
+    commission.payhero_reference = result.get("reference")
+    db.commit()
+
+    return {
+        "message": f"M-Pesa prompt sent to {phone}. Complete payment to clear your commission.",
+        "amount": commission.commission_amount,
+        "reference": result.get("reference"),
+    }
+
+# ---------------------------------------------------------------------------
+# Admin — marketplace management
+# ---------------------------------------------------------------------------
+@app.get("/admin/market/listings", tags=["Admin"])
+def admin_all_listings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    status: Optional[ListingStatus] = None,
+    skip: int = 0,
+    limit: int = 100,
+):
+    """Admin: view all listings."""
+    if not current_user.is_vip:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    query = db.query(Listing)
+    if status:
+        query = query.filter(Listing.status == status)
+    listings = query.order_by(Listing.created_at.desc()).offset(skip).limit(limit).all()
+    return {"total": query.count(), "listings": [{"id": l.id, "title": l.title, "price": l.price, "status": l.status, "seller_id": l.seller_id, "created_at": l.created_at} for l in listings]}
+
+@app.patch("/admin/market/listings/{listing_id}/suspend", tags=["Admin"])
+def admin_suspend_listing(listing_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Admin: suspend a listing."""
+    if not current_user.is_vip:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    listing.status = ListingStatus.SUSPENDED
+    db.commit()
+    return {"message": f"Listing {listing_id} suspended"}
+
+@app.get("/admin/market/commissions", tags=["Admin"])
+def admin_all_commissions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Admin: view all commissions."""
+    if not current_user.is_vip:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    commissions = db.query(Commission).order_by(Commission.created_at.desc()).all()
+    total_earned = sum(c.commission_amount for c in commissions if c.status == CommissionStatus.PAID)
+    total_pending = sum(c.commission_amount for c in commissions if c.status == CommissionStatus.PENDING)
+    return {
+        "total_earned": total_earned,
+        "total_pending": total_pending,
+        "commissions": [{"id": c.id, "seller_id": c.seller_id, "listing_id": c.listing_id, "amount": c.commission_amount, "status": c.status, "due_date": c.due_date} for c in commissions],
+    }
+
+@app.patch("/admin/market/commissions/{commission_id}/mark-paid", tags=["Admin"])
+def admin_mark_commission_paid(commission_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Admin: manually mark a commission as paid after verifying M-Pesa receipt."""
+    if not current_user.is_vip:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    commission = db.query(Commission).filter(Commission.id == commission_id).first()
+    if not commission:
+        raise HTTPException(status_code=404, detail="Commission not found")
+    commission.status = CommissionStatus.PAID
+    commission.paid_at = datetime.utcnow()
+    # Clear the seller's unpaid flag if no more pending commissions
+    remaining = db.query(Commission).filter(
+        Commission.seller_id == commission.seller_id,
+        Commission.status == CommissionStatus.PENDING,
+        Commission.id != commission_id,
+    ).count()
+    if remaining == 0:
+        seller = db.query(SellerProfile).filter(SellerProfile.user_id == commission.seller_id).first()
+        if seller:
+            seller.has_unpaid_commission = False
+    db.commit()
+    return {"message": f"Commission {commission_id} marked as paid"}
