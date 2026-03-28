@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-safesave_db}
+      POSTGRES_USER: ${DB_USER:-safesave}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-safesave123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-safesave}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - safesave_network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - safesave_network
+
+  backend:
+    build: .
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DEBUG: ${DEBUG:-false}
+      SECRET_KEY: ${SECRET_KEY}
+      DATABASE_URL: postgresql://${DB_USER:-safesave}:${DB_PASSWORD:-safesave123}@db:5432/${DB_NAME:-safesave_db}
+      PAYHERO_API_KEY: ${PAYHERO_API_KEY}
+      PAYHERO_API_SECRET: ${PAYHERO_API_SECRET}
+      PAYHERO_BASE_URL: ${PAYHERO_BASE_URL}
+      PAYHERO_WEBHOOK_SECRET: ${PAYHERO_WEBHOOK_SECRET}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CUSTOMER_SUPPORT_EMAIL: ${CUSTOMER_SUPPORT_EMAIL}
+      CUSTOMER_SUPPORT_PHONE: ${CUSTOMER_SUPPORT_PHONE}
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - safesave_network
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    networks:
+      - safesave_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  safesave_network:
+    driver: bridge
