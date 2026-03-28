@@ -33,9 +33,9 @@ services:
       - key: PAYHERO_WEBHOOK_SECRET
         sync: false
       - key: WEBHOOK_URL
-        value: https://safesave.onrender.com/webhooks/payhero
+        value: https://safesave-81bf.onrender.com/webhooks/payhero
       - key: FRONTEND_URL
-        value: https://safesave.onrender.com
+        value: https://safesave-81bf.onrender.com
       - key: LOG_LEVEL
         value: INFO
       - key: MIN_DEPOSIT
