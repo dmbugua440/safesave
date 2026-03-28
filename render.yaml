@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: safesave
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: MAINTENANCE_MODE
+        value: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 30
+      - key: DATABASE_URL
+        fromDatabase:
+          name: safesave-db
+          property: connectionString
+      - key: PAYHERO_API_KEY
+        sync: false
+      - key: PAYHERO_API_SECRET
+        sync: false
+      - key: PAYHERO_BASE_URL
+        value: https://backend.payhero.co.ke/api/v2
+      - key: PAYHERO_CHANNEL_ID
+        sync: false
+      - key: PAYHERO_WEBHOOK_SECRET
+        sync: false
+      - key: WEBHOOK_URL
+        value: https://safesave.onrender.com/webhooks/payhero
+      - key: FRONTEND_URL
+        value: https://safesave.onrender.com
+      - key: LOG_LEVEL
+        value: INFO
+      - key: MIN_DEPOSIT
+        value: 100
+      - key: MAX_DEPOSIT
+        value: 1000000
+      - key: VIP_MINIMUM_DEPOSIT
+        value: 5000
+      - key: COMPANY_NAME
+        value: SafeSave Ltd
+      - key: CUSTOMER_SUPPORT_EMAIL
+        value: support@safesave.com
+      - key: CUSTOMER_SUPPORT_PHONE
+        value: "+254712345678"
+
+databases:
+  - name: safesave-db
+    plan: free
+    databaseName: safesave_db
+    user: safesave
