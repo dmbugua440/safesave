@@ -1028,7 +1028,7 @@ async def payhero_webhook(request: Request, background_tasks: BackgroundTasks, d
 def customer_care():
     return {
         "email": os.getenv("CUSTOMER_SUPPORT_EMAIL", "support@safesave.com"),
-        "phone": os.getenv("CUSTOMER_SUPPORT_PHONE", "+254712345678"),
+        "phone": os.getenv("CUSTOMER_SUPPORT_PHONE", "+254113824952"),
         "company": os.getenv("COMPANY_NAME", "SafeSave Ltd"),
         "business_hours": "Mon-Fri 9AM-6PM (EAT)",
     }
